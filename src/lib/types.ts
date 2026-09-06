@@ -20,7 +20,7 @@ export interface Timesheet {
   userId: string;
   clockIn: number; // timestamp
   clockOut: number | null; // timestamp
-  status: 'pending' | 'approved' | 'rejected';
+  status: 'pending' | 'approved';
   totalHours: number; // updated on clockOut
   location?: { lat: number; lng: number }; // For Geolocation
 }

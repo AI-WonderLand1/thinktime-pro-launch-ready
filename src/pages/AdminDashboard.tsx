@@ -17,10 +17,43 @@ async function requireGoogleResponse(response: Response, action: string) {
   throw new Error(`${action} failed (${response.status})${detail ? `: ${detail}` : ''}`);
 }
 
+function localDateBoundary(value: string, endOfDay = false): number {
+  const suffix = endOfDay ? 'T23:59:59.999' : 'T00:00:00.000';
+  const timestamp = new Date(`${value}${suffix}`).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function csvCell(value: unknown): string {
+  let text = String(value ?? '');
+  if (/^[=+@-]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function safeMailHeader(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
+function gmailRawMessage(to: string, subject: string, body: string): string {
+  const message = [
+    `To: ${safeMailHeader(to)}`,
+    `Subject: ${safeMailHeader(subject)}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    body,
+  ].join('\r\n');
+  const bytes = new TextEncoder().encode(message);
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
 export default function AdminDashboard({ user }: { user: User }) {
   const [timesheets, setTimesheets] = useState<(Timesheet & { userName?: string })[]>([]);
   const [users, setUsers] = useState<Record<string, User>>({});
   const [workspaceToken, setWorkspaceToken] = useState<string | null>(null);
+  const [workspaceTokenIssuedAt, setWorkspaceTokenIssuedAt] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
   
   // Company Settings State
@@ -78,7 +111,8 @@ export default function AdminDashboard({ user }: { user: User }) {
   };
 
   const getWorkspaceToken = async () => {
-    if (workspaceToken) return workspaceToken;
+    if (workspaceToken && Date.now() - workspaceTokenIssuedAt < 45 * 60 * 1000) return workspaceToken;
+    if (workspaceToken) setWorkspaceToken(null);
     
     const provider = new GoogleAuthProvider();
     provider.addScope('https://www.googleapis.com/auth/gmail.send');
@@ -93,6 +127,7 @@ export default function AdminDashboard({ user }: { user: User }) {
           const credential = GoogleAuthProvider.credentialFromResult(result);
           if (credential?.accessToken) {
             setWorkspaceToken(credential.accessToken);
+            setWorkspaceTokenIssuedAt(Date.now());
             return credential.accessToken;
           }
         } catch (linkError: any) {
@@ -101,6 +136,7 @@ export default function AdminDashboard({ user }: { user: User }) {
             const credential = GoogleAuthProvider.credentialFromResult(result);
             if (credential?.accessToken) {
               setWorkspaceToken(credential.accessToken);
+              setWorkspaceTokenIssuedAt(Date.now());
               return credential.accessToken;
             }
           } else if (linkError.code === 'auth/credential-already-in-use') {
@@ -110,16 +146,22 @@ export default function AdminDashboard({ user }: { user: User }) {
           }
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Workspace Auth Error:", error);
-      alert("Could not connect to Google Workspace. Did you close the popup?");
+      if (error?.code === 'auth/operation-not-allowed') {
+        alert('Google sign-in is disabled in Firebase. Enable Google in Firebase Console → Authentication → Sign-in method before using Docs, Sheets, or Gmail export.');
+      } else if (error?.code === 'auth/popup-closed-by-user') {
+        alert('Google Workspace connection was cancelled.');
+      } else {
+        alert(error?.message || 'Could not connect to Google Workspace.');
+      }
       return null;
     }
     return null;
   };
 
   const fetchAIReport = async () => {
-    const formattedTimesheets = timesheets.map(t => ({
+    const formattedTimesheets = filteredTimesheets.map(t => ({
       employee: users[t.userId]?.name || 'Unknown',
       clockIn: format(t.clockIn, 'MM/dd/yyyy HH:mm'),
       clockOut: t.clockOut ? format(t.clockOut, 'HH:mm') : 'Active',
@@ -131,7 +173,7 @@ export default function AdminDashboard({ user }: { user: User }) {
     const response = await fetch('/api/generate-report', {
       method: 'POST',
       headers: aiHeaders,
-      body: JSON.stringify({ companyName, llcNumber, timesheets: formattedTimesheets })
+      body: JSON.stringify({ companyName, llcNumber, dateRange: { start: startDate, end: endDate }, timesheets: formattedTimesheets })
     });
     
     if (!response.ok) {
@@ -143,6 +185,7 @@ export default function AdminDashboard({ user }: { user: User }) {
   };
 
   const exportToDocs = async () => {
+    if (filteredTimesheets.length === 0) { alert('No timesheets exist in the selected date range.'); return; }
     const confirmed = window.confirm("Create a new Google Doc with an AI-generated narrative report?");
     if (!confirmed) return;
 
@@ -195,6 +238,7 @@ export default function AdminDashboard({ user }: { user: User }) {
   };
 
   const exportToSheets = async () => {
+    if (filteredTimesheets.length === 0) { alert('No timesheets exist in the selected date range.'); return; }
     const confirmed = window.confirm("Create a new Google Sheet with structured timesheet data?");
     if (!confirmed) return;
 
@@ -223,12 +267,13 @@ export default function AdminDashboard({ user }: { user: User }) {
       const values = [
         ["Company Name:", companyName || 'N/A'],
         ["LLC / Registration #:", llcNumber || 'N/A'],
+        ["Pay Period:", `${startDate} to ${endDate}`],
         ["Report Date:", format(new Date(), 'MM/dd/yyyy HH:mm')],
         [],
         ["Employee ID", "Employee Name", "Clock In", "Clock Out", "Hours", "Status"]
       ];
 
-      timesheets.forEach(t => {
+      filteredTimesheets.forEach(t => {
         values.push([
           users[t.userId]?.employeeId || t.userId.substring(0, 6),
           users[t.userId]?.name || 'Unknown',
@@ -263,7 +308,7 @@ export default function AdminDashboard({ user }: { user: User }) {
     let text = `${companyName || 'Company'} Timesheet Report\n`;
     if (llcNumber) text += `LLC/ID: ${llcNumber}\n`;
     text += `\n`;
-    timesheets.forEach(t => {
+    filteredTimesheets.forEach(t => {
       const empName = users[t.userId]?.name || 'Unknown';
       const cIn = format(t.clockIn, 'MM/dd/yyyy HH:mm');
       const cOut = t.clockOut ? format(t.clockOut, 'HH:mm') : 'Active';
@@ -274,6 +319,7 @@ export default function AdminDashboard({ user }: { user: User }) {
   };
 
   const emailReport = async () => {
+    if (filteredTimesheets.length === 0) { alert('No timesheets exist in the selected date range.'); return; }
     const deliveryEmail = user.contactEmail?.trim();
     if (!deliveryEmail) {
       alert('Add a real contact/payroll email to the administrator profile before sending reports by Gmail.');
@@ -294,16 +340,11 @@ export default function AdminDashboard({ user }: { user: User }) {
       } catch(e) {
         console.warn("AI generation failed for email, using basic text.");
       }
-
-      const emailLines = [
-        "To: " + deliveryEmail, 
-        `Subject: ${companyName || 'Company'} - Timesheet Report`,
-        "",
-        reportText
-      ];
-      
-      const emailContent = emailLines.join('\n');
-      const base64EncodedEmail = btoa(unescape(encodeURIComponent(emailContent))).replace(/\+/g, '-').replace(/\//g, '_');
+      const base64EncodedEmail = gmailRawMessage(
+        deliveryEmail,
+        `${companyName || 'Company'} - Timesheet Report (${startDate} to ${endDate})`,
+        reportText,
+      );
 
       const gmailRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
         method: 'POST',
@@ -368,16 +409,7 @@ export default function AdminDashboard({ user }: { user: User }) {
       }
 
       const { subject, body } = await response.json();
-
-      const emailLines = [
-        "To: " + deliveryEmail, 
-        `Subject: ${subject}`,
-        "",
-        body
-      ];
-      
-      const emailContent = emailLines.join('\n');
-      const base64EncodedEmail = btoa(unescape(encodeURIComponent(emailContent))).replace(/\+/g, '-').replace(/\//g, '_');
+      const base64EncodedEmail = gmailRawMessage(deliveryEmail, subject, body);
 
       const payrollGmailRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
         method: 'POST',
@@ -399,6 +431,7 @@ export default function AdminDashboard({ user }: { user: User }) {
   };
 
   const exportPDF = () => {
+    if (filteredTimesheets.length === 0) { alert('No timesheets exist in the selected date range.'); return; }
     const doc = new jsPDF();
     doc.text(`${companyName || 'Company'} - Timesheet Report`, 14, 15);
     if (llcNumber) {
@@ -406,7 +439,10 @@ export default function AdminDashboard({ user }: { user: User }) {
       doc.text(`LLC/ID: ${llcNumber}`, 14, 22);
     }
     
-    const tableData = timesheets.map(t => [
+    doc.setFontSize(9);
+    doc.text(`Pay Period: ${startDate} to ${endDate}`, 14, llcNumber ? 27 : 22);
+
+    const tableData = filteredTimesheets.map(t => [
       users[t.userId]?.name || 'Unknown',
       format(t.clockIn, 'MM/dd/yyyy HH:mm'),
       t.clockOut ? format(t.clockOut, 'HH:mm') : 'Active',
@@ -417,15 +453,16 @@ export default function AdminDashboard({ user }: { user: User }) {
     autoTable(doc, {
       head: [['Employee', 'Clock In', 'Clock Out', 'Hours', 'Status']],
       body: tableData,
-      startY: 30
+      startY: llcNumber ? 34 : 29
     });
 
     doc.save(`${companyName ? companyName + '-' : ''}timesheets.pdf`);
   };
 
   const exportCSV = () => {
+    if (filteredTimesheets.length === 0) { alert('No timesheets exist in the selected date range.'); return; }
     const headers = ['Employee ID', 'Employee Name', 'Clock In', 'Clock Out', 'Hours', 'Status'];
-    const rows = timesheets.map(t => [
+    const rows = filteredTimesheets.map(t => [
       users[t.userId]?.employeeId || t.userId,
       users[t.userId]?.name || 'Unknown',
       format(t.clockIn, 'MM/dd/yyyy HH:mm'),
@@ -433,27 +470,31 @@ export default function AdminDashboard({ user }: { user: User }) {
       t.totalHours ? t.totalHours.toFixed(2) : '0',
       t.status
     ]);
-    
-    const csvContent = "data:text/csv;charset=utf-8," 
-      + (companyName ? `Company: ${companyName}\n` : '')
-      + (llcNumber ? `LLC: ${llcNumber}\n\n` : '')
-      + headers.join(",") + "\n" 
-      + rows.map(e => e.join(",")).join("\n");
-      
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${companyName ? companyName + '-' : ''}timesheets.csv`);
+
+    const lines = [
+      [companyName || 'Company', `Pay Period: ${startDate} to ${endDate}`].map(csvCell).join(','),
+      llcNumber ? ['LLC / Registration #', llcNumber].map(csvCell).join(',') : '',
+      headers.map(csvCell).join(','),
+      ...rows.map(row => row.map(csvCell).join(',')),
+    ].filter(Boolean);
+
+    const blob = new Blob([`\uFEFF${lines.join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${companyName ? companyName.replace(/[^a-z0-9_-]+/gi, '-') + '-' : ''}timesheets-${startDate}-to-${endDate}.csv`;
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   // Filter timesheets by Date Range
-  const filteredTimesheets = timesheets.filter(t => {
+  const dateRangeInvalid = Boolean(startDate && endDate && startDate > endDate);
+  const filteredTimesheets = dateRangeInvalid ? [] : timesheets.filter(t => {
     if (!startDate || !endDate) return true;
-    const sDate = new Date(startDate).setHours(0,0,0,0);
-    const eDate = new Date(endDate).setHours(23,59,59,999);
+    const sDate = localDateBoundary(startDate);
+    const eDate = localDateBoundary(endDate, true);
     return t.clockIn >= sDate && t.clockIn <= eDate;
   });
 
@@ -463,10 +504,10 @@ export default function AdminDashboard({ user }: { user: User }) {
   const payrollSummaries = (Object.values(users) as User[])
     .filter(u => u.role === 'employee')
     .map(emp => {
-      const empSheets = filteredTimesheets.filter(t => t.userId === emp.id);
+      const empSheets = filteredTimesheets.filter(t => t.userId === emp.id && t.status === 'approved' && t.clockOut !== null);
       const totalHours = empSheets.reduce((sum, t) => sum + (t.totalHours || 0), 0);
       const payRate = emp.payRate || 0;
-      const grossPay = totalHours * payRate;
+      const grossPay = totalHours * payRate; // straight-time estimate only
       return { ...emp, totalHours, grossPay, timesheets: empSheets };
     })
     .filter(emp => emp.totalHours > 0);
@@ -548,21 +589,29 @@ export default function AdminDashboard({ user }: { user: User }) {
                   />
                 </div>
               </div>
+              {dateRangeInvalid && (
+                <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                  End date must be on or after the start date.
+                </div>
+              )}
+              <div className="border-b border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-200/80">
+                Pay shown here is an estimate of approved hours × hourly rate only. It does not calculate overtime premiums, taxes, deductions, benefits, or jurisdiction-specific payroll rules.
+              </div>
               
               <div className="p-0 overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-900/20">
                     <tr className="text-xs text-slate-400 uppercase tracking-tighter border-b border-slate-800">
                       <th className="py-3 font-medium pl-6">Employee</th>
-                      <th className="py-3 font-medium">Total Hours</th>
+                      <th className="py-3 font-medium">Approved Hours</th>
                       <th className="py-3 font-medium">Pay Rate</th>
-                      <th className="py-3 font-medium text-emerald-400">Gross Pay</th>
+                      <th className="py-3 font-medium text-emerald-400">Est. Straight-Time Pay</th>
                       <th className="py-3 font-medium text-right pr-6">Send Report</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50 text-sm">
                     {payrollSummaries.length === 0 ? (
-                      <tr><td colSpan={5} className="py-6 text-center text-slate-500">No hours logged in this date range.</td></tr>
+                      <tr><td colSpan={5} className="py-6 text-center text-slate-500">No approved completed hours in this date range.</td></tr>
                     ) : payrollSummaries.map((emp) => (
                       <tr key={emp.id} className="hover:bg-slate-800/30 transition-colors">
                         <td className="py-3 pl-6 font-medium text-slate-200">

@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { auth, db } from './lib/firebase';
+import { auth, authReady, db } from './lib/firebase';
 import { User } from './lib/types';
 import Login from './pages/Login';
 import EmployeeDashboard from './pages/EmployeeDashboard';
@@ -24,34 +24,47 @@ export default function App() {
 
   useEffect(() => {
     let unsubscribeProfile: (() => void) | null = null;
+    let unsubscribeAuth: (() => void) | null = null;
+    let cancelled = false;
 
-    const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
-      unsubscribeProfile?.();
-      unsubscribeProfile = null;
+    void authReady.then(() => {
+      if (cancelled) return;
+      unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
+        unsubscribeProfile?.();
+        unsubscribeProfile = null;
 
-      if (!firebaseUser) {
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-      unsubscribeProfile = onSnapshot(
-        doc(db, 'users', firebaseUser.uid),
-        (userDoc) => {
-          setUser(userDoc.exists() ? ({ id: firebaseUser.uid, ...userDoc.data() } as User) : null);
-          setLoading(false);
-        },
-        (error) => {
-          console.error('Failed to load ThinkTime user profile:', error);
+        if (!firebaseUser) {
           setUser(null);
           setLoading(false);
-        },
-      );
+          return;
+        }
+
+        setLoading(true);
+        unsubscribeProfile = onSnapshot(
+          doc(db, 'users', firebaseUser.uid),
+          (userDoc) => {
+            if (!userDoc.exists()) {
+              console.warn('Authenticated Firebase account has no ThinkTime profile. Signing out.');
+              setUser(null);
+              setLoading(false);
+              void auth.signOut();
+              return;
+            }
+            setUser({ id: firebaseUser.uid, ...userDoc.data() } as User);
+            setLoading(false);
+          },
+          (error) => {
+            console.error('Failed to load ThinkTime user profile:', error);
+            setUser(null);
+            setLoading(false);
+          },
+        );
+      });
     });
 
     return () => {
-      unsubscribeAuth();
+      cancelled = true;
+      unsubscribeAuth?.();
       unsubscribeProfile?.();
     };
   }, []);
@@ -78,7 +91,8 @@ export default function App() {
         <Route path="/admin" element={user && user.role === 'admin' ? <AdminDashboard user={user} /> : <Navigate to="/" />} />
         <Route path="/manager" element={user && user.role === 'manager' ? <ManagerDashboard user={user} /> : <Navigate to="/" />} />
         <Route path="/team" element={user && user.role === 'admin' ? <TeamManagement user={user} /> : <Navigate to="/" />} />
-        <Route path="/settings" element={user ? <Settings user={user} /> : <Navigate to="/" />} />
+        <Route path="/settings" element={user ? <Settings user={user} /> : <Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   );

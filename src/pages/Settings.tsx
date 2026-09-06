@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { doc, getDoc, setDoc, updateDoc, collection, getDocs, query, where } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, collection, getDocs } from 'firebase/firestore';
 import { sendPasswordResetEmail, updatePassword } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
 import { User, CompanySettings } from '../lib/types';
 import Sidebar from '../components/Sidebar';
+import InstallAppButton from '../components/InstallAppButton';
 import { Building2, Save, Loader2, UserCircle, Users, Key, BrainCircuit, Eye, EyeOff, PlugZap, Trash2, ShieldCheck } from 'lucide-react';
 import { AI_DEFAULT_MODELS, AI_PROVIDER_LABELS, AIProvider, AISettings, clearAISettings, loadAISettings, saveAISettings } from '../lib/aiSettings';
 import { buildAIRequestHeaders } from '../lib/aiClient';
@@ -38,10 +39,12 @@ export default function Settings({ user }: { user: User }) {
       };
       
       const fetchEmployees = async () => {
-        const q = query(collection(db, 'users'), where('role', '==', 'employee'));
-        const snap = await getDocs(q);
+        const snap = await getDocs(collection(db, 'users'));
         const emps: User[] = [];
-        snap.forEach(d => emps.push({ id: d.id, ...d.data() } as User));
+        snap.forEach(d => {
+          const account = { id: d.id, ...d.data() } as User;
+          if (account.role !== 'admin') emps.push(account);
+        });
         setEmployees(emps);
       };
       
@@ -118,7 +121,7 @@ export default function Settings({ user }: { user: User }) {
 
   const saveProfileContactEmail = async () => {
     const value = profileContactEmail.trim();
-    if (!value || !value.includes('@')) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
       alert('Enter a valid contact/payroll email address.');
       return;
     }
@@ -302,6 +305,15 @@ export default function Settings({ user }: { user: User }) {
                 Change Password
               </button>
             </div>
+          </section>
+
+          <section className="bg-[#0F172A]/80 backdrop-blur-md border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h3 className="text-lg font-semibold mb-2 flex items-center gap-3">
+              <ShieldCheck className="w-5 h-5 text-sky-400" />
+              Desktop App
+            </h3>
+            <p className="text-sm text-slate-400 mb-4">Install ThinkTime Pro on this computer so it opens from your desktop/application menu like an app.</p>
+            <InstallAppButton compact />
           </section>
 
           {/* Company Settings (Admin Only) */}
@@ -514,7 +526,7 @@ export default function Settings({ user }: { user: User }) {
                   <span>
                     <span className="block text-sm text-slate-200">Remember API key on this device</span>
                     <span className="block text-xs text-slate-500 mt-0.5">
-                      Off by default. When off, the key is kept only for this browser session. When on, it is stored in this browser&apos;s local storage.
+                      Off by default. When off, the key is kept only for this browser session. When on, it is stored in this browser&apos;s local storage and can be read by anyone with access to this browser profile. Use session-only storage on shared computers.
                     </span>
                   </span>
                 </label>

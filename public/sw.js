@@ -1,4 +1,4 @@
-self.addEventListener('install', (event) => {
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
@@ -7,25 +7,41 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  const data = event.data ? event.data.json() : { title: 'Shift Reminder', body: 'You have an upcoming shift.' };
-  
+  let data = { title: 'ThinkTime Pro', body: 'You have a new ThinkTime notification.' };
+  if (event.data) {
+    try {
+      data = { ...data, ...event.data.json() };
+    } catch {
+      data.body = event.data.text() || data.body;
+    }
+  }
+
   event.waitUntil(
-    self.registration.showNotification(data.title, {
-      body: data.body,
-      icon: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%23020617'/><circle cx='96' cy='96' r='48' fill='%230ea5e9'/></svg>",
-      badge: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%23020617'/><circle cx='96' cy='96' r='48' fill='%230ea5e9'/></svg>"
+    self.registration.showNotification(String(data.title || 'ThinkTime Pro'), {
+      body: String(data.body || ''),
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      data: { url: '/' },
     })
   );
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window' }).then(clientList => {
-      for (const client of clientList) {
-        if (client.url === '/' && 'focus' in client) return client.focus();
+  const targetPath = event.notification.data?.url || '/';
+  event.waitUntil((async () => {
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clientList) {
+      try {
+        const url = new URL(client.url);
+        if (url.origin === self.location.origin && 'focus' in client) {
+          if ('navigate' in client && url.pathname !== targetPath) await client.navigate(targetPath);
+          return client.focus();
+        }
+      } catch {
+        // Ignore malformed client URLs and open a fresh window below.
       }
-      if (self.clients.openWindow) return self.clients.openWindow('/');
-    })
-  );
+    }
+    return self.clients.openWindow ? self.clients.openWindow(targetPath) : undefined;
+  })());
 });

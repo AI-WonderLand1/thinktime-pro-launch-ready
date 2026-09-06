@@ -1,5 +1,5 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getApp, getApps, initializeApp } from 'firebase/app';
+import { browserSessionPersistence, getAuth, setPersistence } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 // Firebase web configuration values are public identifiers, not server secrets.
@@ -13,8 +13,12 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '164223903788',
 };
 
-const app = initializeApp(firebaseConfig);
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+// Workforce sessions should not silently survive a full browser/app restart.
+export const authReady = setPersistence(auth, browserSessionPersistence).catch((error) => {
+  console.warn('Could not switch Firebase Auth to session persistence:', error);
+});
 export const db = getFirestore(
   app,
   import.meta.env.VITE_FIREBASE_DATABASE_ID || 'ai-studio-thinktimepro-533f3657-be4e-4985-819e-a6f254e8d983',

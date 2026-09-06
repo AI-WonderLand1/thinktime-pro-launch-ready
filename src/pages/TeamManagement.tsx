@@ -1,18 +1,23 @@
 import { useEffect, useState, useRef } from 'react';
-import { collection, getDocs, addDoc, query, orderBy, onSnapshot, doc, setDoc, where } from 'firebase/firestore';
+import { collection, getDocs, addDoc, query, orderBy, onSnapshot, doc, setDoc, where, updateDoc, deleteField } from 'firebase/firestore';
 import { deleteApp, initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, deleteUser, signOut } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
 import { User } from '../lib/types';
 import Sidebar from '../components/Sidebar';
-import { Users, Mail, BadgeCheck, ShieldAlert, Send, Plus, Loader2, MessageSquare } from 'lucide-react';
+import { normalizeEmployeeId } from '../lib/authHelpers';
+import { Users, Send, Plus, Loader2, MessageSquare, Pencil, Save, X } from 'lucide-react';
 
 export default function TeamManagement({ user }: { user: User }) {
   const [teamMembers, setTeamMembers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Add Employee State
-  const generateRandomId = () => Math.floor(100000 + Math.random() * 900000).toString();
+  const generateRandomId = () => {
+    const values = new Uint32Array(1);
+    crypto.getRandomValues(values);
+    return String(100000 + (values[0] % 900000));
+  };
   const [newEmpName, setNewEmpName] = useState('');
   const [newEmpEmail, setNewEmpEmail] = useState('');
   const [newEmpId, setNewEmpId] = useState(generateRandomId());
@@ -20,6 +25,14 @@ export default function TeamManagement({ user }: { user: User }) {
   const [newEmpRole, setNewEmpRole] = useState<'employee' | 'manager'>('employee');
   const [newEmpManagerId, setNewEmpManagerId] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+
+  const [editingMember, setEditingMember] = useState<User | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editPay, setEditPay] = useState('');
+  const [editRole, setEditRole] = useState<'employee' | 'manager'>('employee');
+  const [editManagerId, setEditManagerId] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const generateTemporaryPassword = () => {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
@@ -54,13 +67,14 @@ export default function TeamManagement({ user }: { user: User }) {
   };
 
   useEffect(() => {
-    if (!chatRecipientId) {
+    const recipientId = normalizeEmployeeId(chatRecipientId);
+    if (!/^\d{6}$/.test(recipientId)) {
       setMessages([]);
       return;
     }
     const q = query(
       collection(db, 'messages'),
-      where('recipientEmpId', '==', chatRecipientId),
+      where('recipientEmpId', '==', recipientId),
       orderBy('timestamp', 'asc')
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -76,11 +90,80 @@ export default function TeamManagement({ user }: { user: User }) {
     return () => unsubscribe();
   }, [chatRecipientId]);
 
+  const nextAvailableEmployeeId = () => {
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const candidate = generateRandomId();
+      if (!teamMembers.some((member) => member.employeeId === candidate)) return candidate;
+    }
+    return generateRandomId();
+  };
+
+  const validEmail = (value: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
+
+  const openEditMember = (member: User) => {
+    if (member.role === 'admin') return;
+    setEditingMember(member);
+    setEditName(member.name || '');
+    setEditEmail(member.contactEmail || '');
+    setEditPay(String(member.payRate ?? 0));
+    setEditRole(member.role === 'manager' ? 'manager' : 'employee');
+    setEditManagerId(member.managerId || '');
+  };
+
+  const saveMemberEdits = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingMember) return;
+
+    const cleanName = editName.trim();
+    const cleanEmail = editEmail.trim();
+    const payRate = Number(editPay || 0);
+    if (!cleanName) return alert('Name is required.');
+    if (!validEmail(cleanEmail)) return alert('Enter a valid contact email.');
+    if (!Number.isFinite(payRate) || payRate < 0 || payRate > 100000) return alert('Enter a valid hourly pay rate.');
+    if (editRole === 'employee' && editManagerId === editingMember.id) return alert('A team member cannot report to themselves.');
+
+    setIsSavingEdit(true);
+    try {
+      await updateDoc(doc(db, 'users', editingMember.id), {
+        name: cleanName,
+        contactEmail: cleanEmail,
+        payRate,
+        role: editRole,
+        managerId: editRole === 'employee' && editManagerId ? editManagerId : deleteField(),
+      });
+      setEditingMember(null);
+      await fetchUsers();
+    } catch (error) {
+      console.error('Failed to update team member:', error);
+      alert('Could not save this team member.');
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
   const handleAddEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanId = newEmpId.toUpperCase().replace('EMP', '').trim();
+    const cleanId = normalizeEmployeeId(newEmpId);
     if (!/^\d{6}$/.test(cleanId)) {
       alert('Employee ID must be exactly 6 digits.');
+      return;
+    }
+    if (teamMembers.some((member) => member.employeeId === cleanId)) {
+      alert('That Employee ID is already in use. A new ID has been generated.');
+      setNewEmpId(nextAvailableEmployeeId());
+      return;
+    }
+    if (!newEmpName.trim()) {
+      alert('Full name is required.');
+      return;
+    }
+    if (!validEmail(newEmpEmail)) {
+      alert('Enter a valid contact email.');
+      return;
+    }
+    const parsedPayRate = Number(newEmpPay || 0);
+    if (!Number.isFinite(parsedPayRate) || parsedPayRate < 0 || parsedPayRate > 100000) {
+      alert('Enter a valid hourly pay rate.');
       return;
     }
 
@@ -94,22 +177,27 @@ export default function TeamManagement({ user }: { user: User }) {
       
       const temporaryPassword = generateTemporaryPassword();
       const { user: newUser } = await createUserWithEmailAndPassword(secondaryAuth, email, temporaryPassword);
-      
-      await setDoc(doc(db, 'users', newUser.uid), {
-        email,
-        name: newEmpName,
-        contactEmail: newEmpEmail.trim(),
-        role: newEmpRole,
-        employeeId: cleanId,
-        payRate: parseFloat(newEmpPay) || 0,
-        ...(newEmpRole === 'employee' && newEmpManagerId ? { managerId: newEmpManagerId } : {})
-      });
-      
+
+      try {
+        await setDoc(doc(db, 'users', newUser.uid), {
+          email,
+          name: newEmpName.trim(),
+          contactEmail: newEmpEmail.trim(),
+          role: newEmpRole,
+          employeeId: cleanId,
+          payRate: parsedPayRate,
+          ...(newEmpRole === 'employee' && newEmpManagerId ? { managerId: newEmpManagerId } : {})
+        });
+      } catch (profileError) {
+        await deleteUser(newUser).catch(() => undefined);
+        throw profileError;
+      }
+
       await signOut(secondaryAuth);
       
       setNewEmpName('');
       setNewEmpEmail('');
-      setNewEmpId(generateRandomId());
+      setNewEmpId(nextAvailableEmployeeId());
       setNewEmpPay('');
       setNewEmpRole('employee');
       setNewEmpManagerId('');
@@ -117,7 +205,14 @@ export default function TeamManagement({ user }: { user: User }) {
       fetchUsers(); // Refresh list
     } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Failed to create employee');
+      if (err?.code === 'auth/email-already-in-use') {
+        setNewEmpId(nextAvailableEmployeeId());
+        alert('That Employee ID already exists in Firebase Authentication. ThinkTime generated a new ID; try again.');
+      } else if (err?.code === 'auth/operation-not-allowed') {
+        alert('Firebase Email/Password authentication is disabled. Enable it in Firebase Console → Authentication → Sign-in method.');
+      } else {
+        alert(err.message || 'Failed to create employee');
+      }
     } finally {
       if (secondaryApp) {
         await deleteApp(secondaryApp).catch(() => undefined);
@@ -128,13 +223,18 @@ export default function TeamManagement({ user }: { user: User }) {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatRecipientId || !chatMessage.trim()) return;
+    const recipientId = normalizeEmployeeId(chatRecipientId);
+    if (!/^\d{6}$/.test(recipientId) || !chatMessage.trim()) return;
+    if (!teamMembers.some((member) => member.employeeId === recipientId)) {
+      alert('Choose a valid team member before sending a message.');
+      return;
+    }
     
     try {
       await addDoc(collection(db, 'messages'), {
         senderId: user.id,
         senderName: user.name,
-        recipientEmpId: chatRecipientId,
+        recipientEmpId: recipientId,
         text: chatMessage,
         timestamp: Date.now()
       });
@@ -248,6 +348,51 @@ export default function TeamManagement({ user }: { user: User }) {
               </form>
             </div>
 
+            {editingMember && (
+              <div className="bg-[#0F172A]/80 backdrop-blur-md rounded-2xl p-6 border border-indigo-500/30 shadow-xl shrink-0">
+                <div className="flex items-center justify-between mb-5">
+                  <div>
+                    <h3 className="text-lg font-semibold flex items-center gap-2"><Pencil className="w-5 h-5 text-indigo-400" /> Edit Team Member</h3>
+                    <p className="text-xs text-slate-500 mt-1">Employee ID EMP{editingMember.employeeId} cannot be changed because it is the login identifier.</p>
+                  </div>
+                  <button type="button" onClick={() => setEditingMember(null)} className="p-2 text-slate-500 hover:text-white" aria-label="Close editor"><X className="w-5 h-5" /></button>
+                </div>
+                <form onSubmit={saveMemberEdits} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Full Name</label>
+                    <input required value={editName} onChange={(e) => setEditName(e.target.value)} className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Contact Email</label>
+                    <input type="email" required value={editEmail} onChange={(e) => setEditEmail(e.target.value)} className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Role</label>
+                    <select value={editRole} onChange={(e) => setEditRole(e.target.value as 'employee' | 'manager')} className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none">
+                      <option value="employee">Employee</option>
+                      <option value="manager">Manager</option>
+                    </select>
+                  </div>
+                  {editRole === 'employee' ? (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400 mb-1">Reports To</label>
+                      <select value={editManagerId} onChange={(e) => setEditManagerId(e.target.value)} className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none">
+                        <option value="">-- No Manager --</option>
+                        {teamMembers.filter((member) => member.role === 'manager').map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
+                      </select>
+                    </div>
+                  ) : <div />}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">Hourly Pay ($)</label>
+                    <div className="flex gap-2">
+                      <input type="number" step="0.01" min="0" value={editPay} onChange={(e) => setEditPay(e.target.value)} className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none" />
+                      <button type="submit" disabled={isSavingEdit} className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50" title="Save changes">{isSavingEdit ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}</button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            )}
+
             {/* Employees List */}
             <div className="bg-[#0F172A]/80 backdrop-blur-md rounded-2xl p-6 border border-slate-800 flex-1 flex flex-col shadow-xl min-h-0">
               <div className="flex justify-between items-center mb-6">
@@ -271,6 +416,7 @@ export default function TeamManagement({ user }: { user: User }) {
                         <th className="pb-3 font-medium">EMP ID</th>
                         <th className="pb-3 font-medium">Pay Rate</th>
                         <th className="pb-3 font-medium">Role</th>
+                        <th className="pb-3 font-medium text-right pr-2">Edit</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/50 text-sm">
@@ -318,6 +464,17 @@ export default function TeamManagement({ user }: { user: User }) {
                               {member.role}
                             </span>
                           </td>
+                          <td className="py-3 text-right pr-2">
+                            {member.role !== 'admin' && (
+                              <button
+                                type="button"
+                                onClick={(event) => { event.stopPropagation(); openEditMember(member); }}
+                                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-indigo-500/50 hover:text-indigo-300"
+                              >
+                                <Pencil className="w-3.5 h-3.5" /> Edit
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -341,7 +498,7 @@ export default function TeamManagement({ user }: { user: User }) {
               <input 
                 type="text" 
                 value={chatRecipientId}
-                onChange={(e) => setChatRecipientId(e.target.value.toUpperCase())}
+                onChange={(e) => setChatRecipientId(e.target.value.toUpperCase().replace(/[^0-9EMP]/g, '').slice(0, 9))}
                 placeholder="Enter EMP ID (e.g. 123456)"
                 className="w-full bg-slate-900/80 border border-slate-700 rounded-lg px-3 py-2 text-sm text-sky-400 font-mono focus:border-sky-500 outline-none"
               />

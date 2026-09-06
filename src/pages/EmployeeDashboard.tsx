@@ -4,13 +4,14 @@ import { db } from '../lib/firebase';
 import { User, Timesheet, CompanySettings } from '../lib/types';
 import Sidebar from '../components/Sidebar';
 import { format, differenceInSeconds } from 'date-fns';
-import { Bell, Play, Square, Building2 } from 'lucide-react';
+import { Bell, Play, Square, Loader2 } from 'lucide-react';
 
 export default function EmployeeDashboard({ user }: { user: User }) {
   const [activeSession, setActiveSession] = useState<Timesheet | null>(null);
   const [recentTimesheets, setRecentTimesheets] = useState<Timesheet[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [sessionDuration, setSessionDuration] = useState('00:00:00');
+  const [isClockAction, setIsClockAction] = useState(false);
   
   // Company Settings
   const [companyName, setCompanyName] = useState('');
@@ -50,6 +51,8 @@ export default function EmployeeDashboard({ user }: { user: User }) {
       
       const active = sheets.find(s => s.clockOut === null);
       setActiveSession(active || null);
+    }, (error) => {
+      console.error('Failed to load timesheets:', error);
     });
 
     return () => unsubscribe();
@@ -63,7 +66,7 @@ export default function EmployeeDashboard({ user }: { user: User }) {
     }
 
     const interval = setInterval(() => {
-      const diffInSeconds = differenceInSeconds(new Date(), new Date(activeSession.clockIn));
+      const diffInSeconds = Math.max(0, differenceInSeconds(new Date(), new Date(activeSession.clockIn)));
       const hours = Math.floor(diffInSeconds / 3600);
       const minutes = Math.floor((diffInSeconds % 3600) / 60);
       const seconds = diffInSeconds % 60;
@@ -76,25 +79,40 @@ export default function EmployeeDashboard({ user }: { user: User }) {
   }, [activeSession]);
 
   const handleClockIn = async () => {
-    await addDoc(collection(db, 'timesheets'), {
-      userId: user.id,
-      clockIn: Date.now(),
-      clockOut: null,
-      status: 'pending',
-      totalHours: 0
-    });
+    if (activeSession || isClockAction) return;
+    setIsClockAction(true);
+    try {
+      await addDoc(collection(db, 'timesheets'), {
+        userId: user.id,
+        clockIn: Date.now(),
+        clockOut: null,
+        status: 'pending',
+        totalHours: 0
+      });
+    } catch (error) {
+      console.error('Clock-in failed:', error);
+      alert('Could not clock in. Check your connection and try again.');
+    } finally {
+      setIsClockAction(false);
+    }
   };
 
   const handleClockOut = async () => {
-    if (!activeSession) return;
-    
-    const clockOutTime = Date.now();
-    const totalHours = (clockOutTime - activeSession.clockIn) / (1000 * 60 * 60);
-
-    await updateDoc(doc(db, 'timesheets', activeSession.id), {
-      clockOut: clockOutTime,
-      totalHours: totalHours
-    });
+    if (!activeSession || isClockAction) return;
+    setIsClockAction(true);
+    try {
+      const clockOutTime = Date.now();
+      const totalHours = Math.max(0, (clockOutTime - activeSession.clockIn) / (1000 * 60 * 60));
+      await updateDoc(doc(db, 'timesheets', activeSession.id), {
+        clockOut: clockOutTime,
+        totalHours
+      });
+    } catch (error) {
+      console.error('Clock-out failed:', error);
+      alert('Could not clock out. Check your connection and try again.');
+    } finally {
+      setIsClockAction(false);
+    }
   };
 
   const requestNotifications = async () => {
@@ -198,16 +216,18 @@ export default function EmployeeDashboard({ user }: { user: User }) {
                 {activeSession ? (
                   <button 
                     onClick={handleClockOut}
+                    disabled={isClockAction}
                     className="flex-1 bg-white text-red-600 font-bold py-4 rounded-xl shadow-lg hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
                   >
-                    <Square className="w-5 h-5" fill="currentColor" /> CLOCK OUT
+                    {isClockAction ? <Loader2 className="w-5 h-5 animate-spin" /> : <Square className="w-5 h-5" fill="currentColor" />} CLOCK OUT
                   </button>
                 ) : (
                   <button 
                     onClick={handleClockIn}
+                    disabled={isClockAction}
                     className="flex-1 bg-white text-indigo-700 font-bold py-4 rounded-xl shadow-lg hover:bg-sky-50 transition-colors flex items-center justify-center gap-2"
                   >
-                    <Play className="w-5 h-5" fill="currentColor" /> CLOCK IN
+                    {isClockAction ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" fill="currentColor" />} CLOCK IN
                   </button>
                 )}
               </div>

@@ -42,9 +42,8 @@ export default function EmployeePortal({ user }: { user: User }) {
       snapshot.forEach(doc => {
         msgs.push({ id: doc.id, ...doc.data() });
       });
-      // We reverse it to show newest at top if we want, or map normally
       setMessages(msgs.reverse());
-    });
+    }, (error) => console.error('Failed to load direct messages:', error));
 
     const q = query(
       collection(db, 'timesheets'),
@@ -60,7 +59,7 @@ export default function EmployeePortal({ user }: { user: User }) {
       });
       const active = sheets.find(s => s.clockOut === null);
       setActiveSession(active || null);
-    });
+    }, (error) => console.error('Failed to load active timesheet:', error));
 
     const qOt = query(
       collection(db, 'ot_requests'),
@@ -72,7 +71,7 @@ export default function EmployeePortal({ user }: { user: User }) {
       const reqs: any[] = [];
       snapshot.forEach(doc => reqs.push({ id: doc.id, ...doc.data() }));
       setMyOtRequests(reqs);
-    });
+    }, (error) => console.error('Failed to load overtime requests:', error));
 
     const qPto = query(
       collection(db, 'pto_requests'),
@@ -84,7 +83,7 @@ export default function EmployeePortal({ user }: { user: User }) {
       const reqs: any[] = [];
       snapshot.forEach(doc => reqs.push({ id: doc.id, ...doc.data() }));
       setMyPtoRequests(reqs);
-    });
+    }, (error) => console.error('Failed to load PTO requests:', error));
 
     return () => {
       unsubscribe();
@@ -100,7 +99,7 @@ export default function EmployeePortal({ user }: { user: User }) {
       return;
     }
     const interval = setInterval(() => {
-      const diffInSeconds = differenceInSeconds(new Date(), new Date(activeSession.clockIn));
+      const diffInSeconds = Math.max(0, differenceInSeconds(new Date(), new Date(activeSession.clockIn)));
       const hours = Math.floor(diffInSeconds / 3600);
       const minutes = Math.floor((diffInSeconds % 3600) / 60);
       const seconds = diffInSeconds % 60;
@@ -112,8 +111,10 @@ export default function EmployeePortal({ user }: { user: User }) {
   }, [activeSession]);
 
   const [isClockingIn, setIsClockingIn] = useState(false);
+  const [isClockingOut, setIsClockingOut] = useState(false);
 
   const handleClockIn = async () => {
+    if (activeSession || isClockingIn) return;
     setIsClockingIn(true);
     try {
       let location = null;
@@ -150,13 +151,21 @@ export default function EmployeePortal({ user }: { user: User }) {
   };
 
   const handleClockOut = async () => {
-    if (!activeSession) return;
-    const clockOutTime = Date.now();
-    const totalHours = (clockOutTime - activeSession.clockIn) / (1000 * 60 * 60);
-    await updateDoc(doc(db, 'timesheets', activeSession.id), {
-      clockOut: clockOutTime,
-      totalHours: totalHours
-    });
+    if (!activeSession || isClockingOut) return;
+    setIsClockingOut(true);
+    try {
+      const clockOutTime = Date.now();
+      const totalHours = Math.max(0, (clockOutTime - activeSession.clockIn) / (1000 * 60 * 60));
+      await updateDoc(doc(db, 'timesheets', activeSession.id), {
+        clockOut: clockOutTime,
+        totalHours
+      });
+    } catch (error) {
+      console.error('Clock-out failed:', error);
+      alert('Failed to clock out. Check your connection and try again.');
+    } finally {
+      setIsClockingOut(false);
+    }
   };
 
   const handleOtSubmit = async (e: React.FormEvent) => {
@@ -166,6 +175,9 @@ export default function EmployeePortal({ user }: { user: User }) {
       return;
     }
     
+    if (!otDates.trim() || !otShift.trim()) { alert('Enter the requested dates and shift.'); return; }
+    if (otDates.trim().length > 200 || otShift.trim().length > 120) { alert('The overtime request is too long.'); return; }
+
     setIsSubmittingOt(true);
     try {
       await addDoc(collection(db, 'ot_requests'), {
@@ -173,8 +185,8 @@ export default function EmployeePortal({ user }: { user: User }) {
         employeeName: user.name,
         employeeId: user.employeeId,
         managerId: user.managerId,
-        requestedDates: otDates,
-        requestedShift: otShift,
+        requestedDates: otDates.trim(),
+        requestedShift: otShift.trim(),
         status: 'pending',
         timestamp: Date.now()
       });
@@ -197,6 +209,10 @@ export default function EmployeePortal({ user }: { user: User }) {
     }
     if (!ptoStart || !ptoEnd) {
       alert('Please provide start and end dates.');
+      return;
+    }
+    if (ptoEnd < ptoStart) {
+      alert('PTO end date cannot be before the start date.');
       return;
     }
     
@@ -265,12 +281,12 @@ export default function EmployeePortal({ user }: { user: User }) {
                 </button>
                 <button 
                   onClick={handleClockOut}
-                  disabled={!activeSession}
+                  disabled={!activeSession || isClockingOut}
                   className={`flex-1 font-bold py-5 rounded-xl shadow-lg transition-colors flex items-center justify-center gap-3 text-lg ${
                     activeSession ? 'bg-white text-red-600 hover:bg-slate-50' : 'bg-white/20 text-white/50 cursor-not-allowed'
                   }`}
                 >
-                  <Square className="w-6 h-6" fill="currentColor" /> CLOCK OUT
+                  {isClockingOut ? <Loader2 className="w-6 h-6 animate-spin" /> : <Square className="w-6 h-6" fill="currentColor" />} {isClockingOut ? 'CLOCKING OUT...' : 'CLOCK OUT'}
                 </button>
               </div>
             </div>

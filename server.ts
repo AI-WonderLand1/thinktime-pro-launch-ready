@@ -1,14 +1,18 @@
 import express, { NextFunction, Request, Response } from 'express';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { config as loadEnv } from 'dotenv';
 
 loadEnv({ path: '.env.local' });
 loadEnv();
 
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'fabled-emissary-09v0l';
+const FIREBASE_DATABASE_ID = process.env.FIREBASE_DATABASE_ID || 'ai-studio-thinktimepro-533f3657-be4e-4985-819e-a6f254e8d983';
 const FIREBASE_CERTS_URL = 'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
 const AI_TIMEOUT_MS = 60_000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 type AIProvider = 'gemini' | 'openai' | 'openrouter' | 'anthropic' | 'custom';
 
@@ -88,10 +92,39 @@ async function requireFirebaseAuth(req: Request, res: Response, next: NextFuncti
   try {
     const payload = await verifyFirebaseIdToken(token);
     res.locals.firebaseUserId = payload.sub;
+    res.locals.firebaseIdToken = token;
     next();
   } catch (error) {
     console.warn('Rejected API authentication:', error instanceof Error ? error.message : 'unknown error');
     return res.status(401).json({ error: 'Invalid or expired session.' });
+  }
+}
+
+async function requireAdminProfile(_req: Request, res: Response, next: NextFunction) {
+  const uid = String(res.locals.firebaseUserId || '');
+  const idToken = String(res.locals.firebaseIdToken || '');
+  if (!uid || !idToken) return res.status(401).json({ error: 'Authentication required.' });
+
+  try {
+    const profileUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/users/${encodeURIComponent(uid)}`;
+    const response = await fetch(profileUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        return res.status(403).json({ error: 'Administrator access required.' });
+      }
+      throw new Error(`Firestore profile lookup failed (${response.status}).`);
+    }
+    const profile = await response.json() as { fields?: { role?: { stringValue?: string } } };
+    if (profile.fields?.role?.stringValue !== 'admin') {
+      return res.status(403).json({ error: 'Administrator access required.' });
+    }
+    next();
+  } catch (error) {
+    console.error('Failed to authorize API administrator:', error instanceof Error ? error.message : 'unknown error');
+    return res.status(503).json({ error: 'Could not verify administrator access.' });
   }
 }
 
@@ -100,8 +133,18 @@ function getClientIp(req: Request) {
 }
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+let rateLimitChecks = 0;
+function pruneRateBuckets(now: number) {
+  rateLimitChecks += 1;
+  if (rateBuckets.size < 5000 && rateLimitChecks % 500 !== 0) return;
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+  if (rateBuckets.size > 50000) rateBuckets.clear();
+}
 function apiRateLimit(req: Request, res: Response, next: NextFunction) {
   const now = Date.now();
+  pruneRateBuckets(now);
   const ip = getClientIp(req);
   const current = rateBuckets.get(ip);
 
@@ -152,7 +195,7 @@ function validateCustomBaseUrl(raw: string): string {
     throw new Error('Custom AI base URL is invalid.');
   }
 
-  const isLocalDev = process.env.NODE_ENV !== 'production' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+  const isLocalDev = !IS_PRODUCTION && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
   if (url.protocol !== 'https:' && !isLocalDev) {
     throw new Error('Custom AI base URL must use HTTPS.');
   }
@@ -164,6 +207,39 @@ function validateCustomBaseUrl(raw: string): string {
   return url.toString().replace(/\/+$/, '');
 }
 
+function isPrivateIpAddress(address: string): boolean {
+  const value = address.toLowerCase();
+  if (value === '::' || value === '::1') return true;
+  if (value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe8') || value.startsWith('fe9') || value.startsWith('fea') || value.startsWith('feb')) return true;
+  if (value.startsWith('::ffff:')) return isPrivateIpAddress(value.slice(7));
+  if (isIP(value) === 4) return isPrivateHost(value);
+  return false;
+}
+
+async function assertPublicCustomEndpoint(endpoint: string) {
+  if (!IS_PRODUCTION) return;
+  const url = new URL(endpoint);
+
+  if (isIP(url.hostname)) {
+    if (isPrivateIpAddress(url.hostname)) throw new Error('Private-network AI base URLs are not allowed in production.');
+    return;
+  }
+
+  let addresses: Awaited<ReturnType<typeof lookup>>;
+  try {
+    addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  } catch {
+    throw new Error('Custom AI provider hostname could not be resolved.');
+  }
+
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw new Error('Custom AI provider hostname did not resolve to an address.');
+  }
+  if (addresses.some(({ address }) => isPrivateIpAddress(address))) {
+    throw new Error('Custom AI provider resolved to a private-network address, which is blocked in production.');
+  }
+}
+
 function resolveAIConfig(req: Request): AIConfig {
   const providerValue = getHeader(req, 'X-ThinkTime-AI-Provider').toLowerCase();
   const provider = isProvider(providerValue) ? providerValue : 'gemini';
@@ -171,9 +247,9 @@ function resolveAIConfig(req: Request): AIConfig {
   let model = getHeader(req, 'X-ThinkTime-AI-Model');
   let baseUrl = getHeader(req, 'X-ThinkTime-AI-Base-Url');
 
-  // Keep AI Studio/local development compatibility without exposing a shared
-  // production key unless the deployer explicitly opts in.
-  if (!apiKey && process.env.GEMINI_API_KEY && (process.env.NODE_ENV !== 'production' || process.env.ALLOW_SERVER_AI_KEY === 'true')) {
+  // Local-development convenience only. Production is BYOK-only so a shared
+  // server key cannot be consumed by arbitrary authenticated accounts.
+  if (!apiKey && process.env.GEMINI_API_KEY && !IS_PRODUCTION) {
     apiKey = process.env.GEMINI_API_KEY;
     if (!model) model = 'gemini-3.8-flash';
     return { provider: 'gemini', apiKey, model };
@@ -265,6 +341,8 @@ async function generateAIText(config: AIConfig, prompt: string): Promise<string>
     ? 'https://openrouter.ai/api/v1/chat/completions'
     : customChatCompletionsUrl(config.baseUrl!);
 
+  if (config.provider === 'custom') await assertPublicCustomEndpoint(endpoint);
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${config.apiKey}`,
@@ -279,6 +357,7 @@ async function generateAIText(config: AIConfig, prompt: string): Promise<string>
     headers,
     body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3 }),
     signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    ...(config.provider === 'custom' ? { redirect: 'error' as const } : {}),
   });
   if (!response.ok) throw await providerError(response);
   const data = await response.json() as any;
@@ -302,13 +381,33 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.set('trust proxy', 1);
+  if (process.env.TRUST_PROXY === 'false') {
+    app.set('trust proxy', false);
+  } else if (process.env.TRUST_PROXY) {
+    const parsed = Number(process.env.TRUST_PROXY);
+    app.set('trust proxy', Number.isFinite(parsed) ? parsed : process.env.TRUST_PROXY);
+  } else if (IS_PRODUCTION) {
+    app.set('trust proxy', 1);
+  }
   app.disable('x-powered-by');
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    if (IS_PRODUCTION) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
+        "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; " +
+        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com wss://*.firebaseio.com; " +
+        "frame-src https://*.firebaseapp.com https://accounts.google.com; worker-src 'self'; manifest-src 'self'"
+      );
+    }
     next();
   });
 
@@ -323,6 +422,7 @@ async function startServer() {
     next();
   });
   app.use('/api', requireFirebaseAuth);
+  app.use('/api', requireAdminProfile);
 
   app.post('/api/ai/test', async (req, res) => {
     try {
@@ -337,14 +437,15 @@ async function startServer() {
   app.post('/api/generate-report', async (req, res) => {
     try {
       const config = resolveAIConfig(req);
-      const { companyName, llcNumber, timesheets } = req.body || {};
+      const { companyName, llcNumber, dateRange, timesheets } = req.body || {};
       if (!Array.isArray(timesheets)) return res.status(400).json({ error: 'Timesheet data is required.' });
 
       const prompt = `
 You are an automated HR assistant for ${companyName || 'the company'} (LLC/ID: ${llcNumber || 'N/A'}).
 Generate a professional, narrative executive summary report of the following timesheet data.
-Include the company name and LLC number prominently at the top.
-Summarize total hours worked, highlight overtime, and note pending approvals.
+Selected pay period: ${dateRange?.start || 'N/A'} to ${dateRange?.end || 'N/A'}.
+Include the company name, LLC number, and selected pay period prominently at the top.
+Summarize total hours worked and note pending approvals. Do not infer statutory overtime, overtime premiums, taxes, deductions, benefits, or legal compliance from this data.
 Format it as a professional letter or memo suitable for a Google Doc.
 Do not output markdown code blocks. Use clean, professional text formatting.
 
@@ -376,7 +477,7 @@ Employee ID: ${employee.id || 'N/A'}
 Pay Period: ${dateRange.start || 'N/A'} to ${dateRange.end || 'N/A'}
 Total Hours Logged: ${Number(employee.totalHours || 0).toFixed(2)}
 Hourly Rate: $${Number(employee.payRate || 0).toFixed(2)}
-Gross Pay: $${Number(employee.grossPay || 0).toFixed(2)}
+Estimated Straight-Time Pay (approved hours × hourly rate): $${Number(employee.grossPay || 0).toFixed(2)}
 Template Type Requested: ${template || 'standard'}
 
 Timesheet Records:
@@ -386,7 +487,8 @@ INSTRUCTIONS:
 1. Write the email subject on the first line starting with "SUBJECT: ".
 2. Leave a blank line, then write the email body.
 3. Match the requested template tone (Friendly, Detailed, or Standard).
-4. Do not include markdown code blocks or asterisks. Keep it plain text.
+4. Clearly call the pay amount an estimate only. Do not call it final payroll or gross wages. Do not infer overtime premiums, taxes, deductions, benefits, or legal compliance.
+5. Do not include markdown code blocks or asterisks. Keep it plain text.
       `.trim();
 
       const responseText = await generateAIText(config, prompt);
@@ -404,7 +506,7 @@ INSTRUCTIONS:
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (!IS_PRODUCTION) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -420,8 +522,9 @@ INSTRUCTIONS:
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ThinkTime Pro listening on port ${PORT}`);
+  const HOST = process.env.HOST || '0.0.0.0';
+  app.listen(PORT, HOST, () => {
+    console.log(`ThinkTime Pro listening on ${HOST}:${PORT}`);
   });
 }
 

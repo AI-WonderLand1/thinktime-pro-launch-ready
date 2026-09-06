@@ -26,47 +26,91 @@ service cloud.firestore {
         currentUser().role == 'manager';
     }
 
+    function validContactEmail(value) {
+      return value is string &&
+        value.size() >= 3 &&
+        value.size() <= 320 &&
+        value.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$');
+    }
+
+    function validLocation(data) {
+      return !('location' in data) ||
+        (data.location is map &&
+          data.location.keys().hasOnly(['lat', 'lng']) &&
+          data.location.lat is number &&
+          data.location.lng is number &&
+          data.location.lat >= -90 && data.location.lat <= 90 &&
+          data.location.lng >= -180 && data.location.lng <= 180);
+    }
+
+    function validDecisionUpdate() {
+      return resource.data.status == 'pending' &&
+        request.resource.data.status in ['approved', 'denied'] &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'denyReason']) &&
+        (!('denyReason' in request.resource.data) ||
+          (request.resource.data.denyReason is string && request.resource.data.denyReason.size() <= 1000));
+    }
+
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin() ||
         (resource.data.managerId is string && isAssignedManager(resource.data.managerId));
-      // Public self-registration can only create an employee profile.
-      // Role/pay/manager changes are admin-only after creation.
-      allow create: if isAdmin() ||
-        (isOwner(userId) &&
-          request.resource.data.keys().hasOnly(['email', 'name', 'contactEmail', 'role', 'employeeId']) &&
-          request.resource.data.role == 'employee' &&
-          request.resource.data.email == request.auth.token.email &&
-          request.resource.data.employeeId is string &&
-          request.resource.data.employeeId.matches('^[0-9]{6}$') &&
-          request.resource.data.email == 'emp' + request.resource.data.employeeId + '@thinktime.local' &&
-          request.resource.data.name is string &&
-          request.resource.data.name.size() >= 1 &&
-          request.resource.data.name.size() <= 120 &&
-          request.resource.data.contactEmail is string &&
-          request.resource.data.contactEmail.size() >= 3 &&
-          request.resource.data.contactEmail.size() <= 320);
+
+      // Workforce accounts are provisioned by an administrator. Firebase Auth may
+      // still allow raw account creation, but an unprovisioned account cannot create
+      // a ThinkTime profile or access company data.
+      allow create: if isAdmin() &&
+        request.resource.data.keys().hasOnly(['email', 'name', 'contactEmail', 'role', 'employeeId', 'payRate', 'managerId']) &&
+        request.resource.data.email is string &&
+        request.resource.data.employeeId is string &&
+        request.resource.data.employeeId.matches('^[0-9]{6}$') &&
+        request.resource.data.email == 'emp' + request.resource.data.employeeId + '@thinktime.local' &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 120 &&
+        validContactEmail(request.resource.data.contactEmail) &&
+        request.resource.data.role in ['admin', 'manager', 'employee'] &&
+        (!('payRate' in request.resource.data) ||
+          (request.resource.data.payRate is number && request.resource.data.payRate >= 0 && request.resource.data.payRate <= 100000)) &&
+        (!('managerId' in request.resource.data) || request.resource.data.managerId is string);
+
       allow update: if isAdmin() ||
-        (isOwner(userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'contactEmail']));
+        (isOwner(userId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'contactEmail']) &&
+          request.resource.data.name is string &&
+          request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 120 &&
+          validContactEmail(request.resource.data.contactEmail));
       allow delete: if isAdmin();
     }
 
     match /settings/{docId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow create, update: if isAdmin() &&
+        request.resource.data.keys().hasOnly(['companyName', 'llcNumber', 'emailTemplate']) &&
+        request.resource.data.companyName is string && request.resource.data.companyName.size() <= 200 &&
+        request.resource.data.llcNumber is string && request.resource.data.llcNumber.size() <= 120 &&
+        request.resource.data.emailTemplate in ['standard', 'detailed', 'friendly'];
+      allow delete: if isAdmin();
     }
 
     match /timesheets/{timesheetId} {
       allow read: if isOwner(resource.data.userId) || isAdmin();
       allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.keys().hasOnly(['userId', 'clockIn', 'clockOut', 'status', 'totalHours', 'location']) &&
         request.resource.data.clockIn is number &&
         request.resource.data.clockIn >= request.time.toMillis() - 300000 &&
         request.resource.data.clockIn <= request.time.toMillis() + 60000 &&
         request.resource.data.clockOut == null &&
         request.resource.data.totalHours == 0 &&
-        request.resource.data.status == 'pending';
-      allow update: if isAdmin() ||
+        request.resource.data.status == 'pending' &&
+        validLocation(request.resource.data);
+      allow update: if (isAdmin() &&
+          resource.data.status == 'pending' &&
+          request.resource.data.status == 'approved' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
         (isOwner(resource.data.userId) &&
           resource.data.clockOut == null &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.clockIn == resource.data.clockIn &&
+          request.resource.data.status == resource.data.status &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut', 'totalHours']) &&
           request.resource.data.clockOut is number &&
           request.resource.data.clockOut >= resource.data.clockIn &&
@@ -82,10 +126,13 @@ service cloud.firestore {
         (isAuthenticated() && resource.data.senderId == request.auth.uid) ||
         (isAuthenticated() && resource.data.recipientEmpId == currentUser().employeeId);
       allow create: if isAdmin() &&
+        request.resource.data.keys().hasOnly(['senderId', 'senderName', 'recipientEmpId', 'text', 'timestamp']) &&
         request.resource.data.senderId == request.auth.uid &&
         request.resource.data.senderName == currentUser().name &&
+        request.resource.data.recipientEmpId is string &&
+        request.resource.data.recipientEmpId.matches('^[0-9]{6}$') &&
         request.resource.data.text is string &&
-        request.resource.data.text.size() <= 5000 &&
+        request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 5000 &&
         request.resource.data.timestamp is number &&
         request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
         request.resource.data.timestamp <= request.time.toMillis() + 60000;
@@ -95,44 +142,53 @@ service cloud.firestore {
     match /ot_requests/{requestId} {
       allow read: if isAdmin() || isOwner(resource.data.userId) || isAssignedManager(resource.data.managerId);
       allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.keys().hasOnly(['userId', 'employeeName', 'employeeId', 'managerId', 'requestedDates', 'requestedShift', 'status', 'timestamp']) &&
         request.resource.data.managerId == currentUser().managerId &&
         request.resource.data.employeeId == currentUser().employeeId &&
         request.resource.data.employeeName == currentUser().name &&
+        request.resource.data.requestedDates is string && request.resource.data.requestedDates.size() >= 1 && request.resource.data.requestedDates.size() <= 200 &&
+        request.resource.data.requestedShift is string && request.resource.data.requestedShift.size() >= 1 && request.resource.data.requestedShift.size() <= 120 &&
         request.resource.data.status == 'pending' &&
         request.resource.data.timestamp is number &&
         request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
         request.resource.data.timestamp <= request.time.toMillis() + 60000;
-      allow update: if isAdmin() ||
-        (isAssignedManager(resource.data.managerId) &&
-          request.resource.data.userId == resource.data.userId &&
-          request.resource.data.managerId == resource.data.managerId &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'denyReason']));
+      allow update: if isAdmin() || (isAssignedManager(resource.data.managerId) && validDecisionUpdate());
       allow delete: if isAdmin();
     }
 
     match /pto_requests/{requestId} {
       allow read: if isAdmin() || isOwner(resource.data.userId) || isAssignedManager(resource.data.managerId);
       allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.keys().hasOnly(['userId', 'employeeName', 'employeeId', 'managerId', 'type', 'startDate', 'endDate', 'status', 'timestamp']) &&
         request.resource.data.managerId == currentUser().managerId &&
         request.resource.data.employeeId == currentUser().employeeId &&
         request.resource.data.employeeName == currentUser().name &&
+        request.resource.data.type in ['Vacation', 'Sick Leave', 'Personal'] &&
+        request.resource.data.startDate is string && request.resource.data.startDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        request.resource.data.endDate is string && request.resource.data.endDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
         request.resource.data.status == 'pending' &&
         request.resource.data.timestamp is number &&
         request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
         request.resource.data.timestamp <= request.time.toMillis() + 60000;
-      allow update: if isAdmin() ||
-        (isAssignedManager(resource.data.managerId) &&
-          request.resource.data.userId == resource.data.userId &&
-          request.resource.data.managerId == resource.data.managerId &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'denyReason']));
+      allow update: if isAdmin() || (isAssignedManager(resource.data.managerId) && validDecisionUpdate());
       allow delete: if isAdmin();
     }
 
     match /reminders/{reminderId} {
       allow read: if isOwner(resource.data.userId) || isAdmin();
-      allow create: if isOwner(request.resource.data.userId) || isAdmin();
+      allow create: if (isOwner(request.resource.data.userId) || isAdmin()) &&
+        request.resource.data.keys().hasOnly(['userId', 'time', 'message']) &&
+        request.resource.data.userId is string &&
+        request.resource.data.time is number &&
+        request.resource.data.message is string &&
+        request.resource.data.message.size() >= 1 && request.resource.data.message.size() <= 1000;
       allow update: if isAdmin() ||
-        (isOwner(resource.data.userId) && request.resource.data.userId == resource.data.userId);
+        (isOwner(resource.data.userId) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.keys().hasOnly(['userId', 'time', 'message']) &&
+          request.resource.data.time is number &&
+          request.resource.data.message is string &&
+          request.resource.data.message.size() >= 1 && request.resource.data.message.size() <= 1000);
       allow delete: if isAdmin() || isOwner(resource.data.userId);
     }
   }

@@ -13,10 +13,10 @@ This export is the AI Studio project:
 - Admin, manager, and employee route separation
 - Firestore rules for users, timesheets, messages, OT, PTO, settings, and reminders
 - Required Firestore composite indexes included
-- Public registration can create employees only (no public admin privilege escalation)
+- No public self-registration; workforce accounts are administrator-issued
 - Admin-created staff receive a strong one-time temporary password instead of their employee ID
 - Signed-in users can change their password in Settings
-- AI routes require a valid Firebase ID token
+- AI routes require a valid Firebase ID token **and an administrator Firestore profile**
 - Per-IP API rate limiting and basic security headers
 - Settings → AI / Bring Your Own Key (BYOK)
 - Gemini, OpenAI, OpenRouter, Anthropic, and custom OpenAI-compatible provider support
@@ -54,7 +54,7 @@ The included `firebase.json` targets the AI Studio Firestore database ID. If you
 
 ### First administrator
 
-Public signup deliberately creates **employees only**. Bootstrap the first administrator in Firebase:
+Public self-registration is disabled. Bootstrap the first administrator in Firebase:
 
 1. Create an Email/Password Auth user in Firebase Authentication. For Employee-ID style login, its email can use the app's internal form such as `emp123456@thinktime.local`.
 2. In Firestore, create `users/<AUTH_UID>` with at least:
@@ -87,20 +87,17 @@ Supported providers:
 
 Enter the provider API key and model ID, then click **Test Connection** and **Save AI Settings**.
 
-By default, the API key is kept in browser session storage and disappears when that browser session ends. If **Remember API key on this device** is enabled, it is stored in that browser's local storage. ThinkTime sends the key over the same HTTPS origin to its authenticated server proxy for the AI request; the app does not store the BYOK key in Firestore.
+By default, the API key is kept in browser session storage and disappears when that browser session ends. If **Remember API key on this device** is enabled, it is stored in that browser's local storage. Anyone who can access that browser profile may be able to read local-storage data, so leave Remember off on shared computers. ThinkTime sends the key over the same HTTPS origin to its authenticated server proxy for the AI request; the app does not store the BYOK key in Firestore.
 
-For a custom provider, production base URLs must use HTTPS. Private-network/localhost custom endpoints are blocked in production to reduce SSRF risk; localhost is permitted during development.
+For a custom provider, production base URLs must use HTTPS. Private-network/localhost custom endpoints are blocked in production to reduce SSRF risk; production also rejects custom-provider redirects and hostnames that resolve to private-network addresses. Localhost is permitted during development.
 
-### Optional server Gemini fallback
+### Local development Gemini fallback
 
-For local development, `GEMINI_API_KEY` may be used when no BYOK key is supplied. A shared server AI key is disabled by default in production. To deliberately enable one:
+For local development only, `GEMINI_API_KEY` may be used when no BYOK key is supplied. Production is intentionally **BYOK-only**; a shared server AI key is not accepted in production, which prevents ordinary authenticated accounts from consuming a deployment-wide provider credential.
 
 ```bash
 GEMINI_API_KEY=...
-ALLOW_SERVER_AI_KEY=true
 ```
-
-BYOK is preferred for production.
 
 ## Production build
 
@@ -152,4 +149,39 @@ ThinkTime currently uses deterministic internal Firebase emails such as `emp1234
 - Deploy `firestore.rules` before production use. The original export referenced collections that were not covered by its rules.
 - Production AI endpoints validate Firebase ID tokens before proxying requests.
 - BYOK values are intentionally not persisted to Firestore.
-# thinktime-pro-launch-ready
+
+## Install ThinkTime Pro on a PC
+
+ThinkTime Pro ships as a Progressive Web App (PWA) plus a Linux desktop installer. On supported browsers, use **Install ThinkTime Pro on this PC** on the login screen or under **Settings → Desktop App**. On Debian/Ubuntu, the included installer creates a local production service and a **ThinkTime Pro** application-menu entry.
+
+The app requires an internet connection for Firebase and cloud AI providers even when installed.
+
+### Debian / Ubuntu local installer
+
+A Linux installer is included for systems where the browser does not expose the PWA install prompt:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+It verifies Node.js 20+, installs dependencies, builds the production app, creates a user-level `systemd` service, health-checks the service, and creates a **ThinkTime Pro** application-menu launcher. Chromium/Chrome/Edge use app-window mode. Firefox on Linux opens a dedicated browser window from the application-menu launcher.
+
+Remove it with:
+
+```bash
+./scripts/uninstall-linux.sh
+```
+
+## Login credential privacy
+
+The Employee ID/password login form intentionally disables browser credential autofill and keeps the credential fields read-only until the user interacts with them. ThinkTime Pro never pre-populates the user's real contact email into the Employee ID field. Password-manager behavior is ultimately controlled by the browser, but the app now opts out of automatic credential filling as strongly as browser standards allow.
+
+
+## Payroll calculation boundary
+
+ThinkTime's payroll summary is a **straight-time estimate only**: approved completed hours × the stored hourly rate. It does not calculate overtime premiums, taxes, deductions, benefits, paid/unpaid breaks, wage statements, or jurisdiction-specific payroll compliance. Use a payroll system or qualified payroll/accounting workflow for final wages.
+
+## Production authentication checklist
+
+In Firebase Authentication, enable **Email/Password** before using Employee-ID sign-in. Enable **Google** only if you intend to use the Google Docs/Sheets/Gmail export workflow. Keep public app registration disabled in the ThinkTime UI; create workforce accounts from **Team Management** after the first administrator is bootstrapped.
