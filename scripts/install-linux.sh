@@ -11,13 +11,13 @@ NPM_BIN="$(command -v npm || true)"
 NODE_BIN="$(command -v node || true)"
 
 if [[ -z "${NPM_BIN}" || -z "${NODE_BIN}" ]]; then
-  echo "Node.js/npm is required. Install Node.js 20+ first, then run this installer again."
+  echo "Node.js/npm is required. Install Node.js 22+ first, then run this installer again."
   exit 1
 fi
 
 NODE_MAJOR="$(${NODE_BIN} -p 'Number(process.versions.node.split(".")[0])')"
-if [[ "${NODE_MAJOR}" -lt 20 ]]; then
-  echo "ThinkTime Pro requires Node.js 20 or newer. Found: $(${NODE_BIN} --version)"
+if [[ "${NODE_MAJOR}" -lt 22 ]]; then
+  echo "ThinkTime Pro requires Node.js 22 or newer. Found: $(${NODE_BIN} --version)"
   exit 1
 fi
 
@@ -48,8 +48,8 @@ if [[ -n "${ENV_BACKUP}" ]]; then
 fi
 
 cd "${APP_DIR}"
-echo "Installing ThinkTime Pro dependencies..."
-"${NPM_BIN}" install --no-audit --no-fund
+echo "Installing ThinkTime Pro dependencies from the verified lockfile..."
+"${NPM_BIN}" ci --no-audit --no-fund
 echo "Building ThinkTime Pro..."
 "${NPM_BIN}" run build
 
