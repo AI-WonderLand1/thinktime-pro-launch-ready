@@ -1,0 +1,81 @@
+{
+  "collections": {
+    "users": {
+      "description": "User profiles, employee IDs, roles, reporting lines, and pay rates",
+      "fields": {
+        "email": { "type": "string" },
+        "contactEmail": { "type": "string" },
+        "role": { "type": "string" },
+        "name": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "payRate": { "type": "number" },
+        "managerId": { "type": "string" }
+      }
+    },
+    "settings": {
+      "description": "Company-level configuration",
+      "fields": {
+        "companyName": { "type": "string" },
+        "llcNumber": { "type": "string" },
+        "emailTemplate": { "type": "string" }
+      }
+    },
+    "timesheets": {
+      "description": "Employee clock-in/out records",
+      "fields": {
+        "userId": { "type": "string" },
+        "clockIn": { "type": "number" },
+        "clockOut": { "type": "number" },
+        "status": { "type": "string" },
+        "totalHours": { "type": "number" }
+      }
+    },
+    "messages": {
+      "description": "Direct messages between administrators and employees",
+      "fields": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "recipientEmpId": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "number" }
+      }
+    },
+    "ot_requests": {
+      "description": "Employee overtime requests routed to managers",
+      "fields": {
+        "userId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "requestedDates": { "type": "string" },
+        "requestedShift": { "type": "string" },
+        "status": { "type": "string" },
+        "denyReason": { "type": "string" },
+        "timestamp": { "type": "number" }
+      }
+    },
+    "pto_requests": {
+      "description": "Employee PTO and leave requests routed to managers",
+      "fields": {
+        "userId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "type": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "status": { "type": "string" },
+        "denyReason": { "type": "string" },
+        "timestamp": { "type": "number" }
+      }
+    },
+    "reminders": {
+      "description": "Shift reminders for employees",
+      "fields": {
+        "userId": { "type": "string" },
+        "time": { "type": "number" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

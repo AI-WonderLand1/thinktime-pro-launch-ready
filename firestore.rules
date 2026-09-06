@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function currentUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        currentUser().role == 'admin';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAssignedManager(managerId) {
+      return isAuthenticated() &&
+        request.auth.uid == managerId &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        currentUser().role == 'manager';
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin() ||
+        (resource.data.managerId is string && isAssignedManager(resource.data.managerId));
+      // Public self-registration can only create an employee profile.
+      // Role/pay/manager changes are admin-only after creation.
+      allow create: if isAdmin() ||
+        (isOwner(userId) &&
+          request.resource.data.keys().hasOnly(['email', 'name', 'contactEmail', 'role', 'employeeId']) &&
+          request.resource.data.role == 'employee' &&
+          request.resource.data.email == request.auth.token.email &&
+          request.resource.data.employeeId is string &&
+          request.resource.data.employeeId.matches('^[0-9]{6}$') &&
+          request.resource.data.email == 'emp' + request.resource.data.employeeId + '@thinktime.local' &&
+          request.resource.data.name is string &&
+          request.resource.data.name.size() >= 1 &&
+          request.resource.data.name.size() <= 120 &&
+          request.resource.data.contactEmail is string &&
+          request.resource.data.contactEmail.size() >= 3 &&
+          request.resource.data.contactEmail.size() <= 320);
+      allow update: if isAdmin() ||
+        (isOwner(userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'contactEmail']));
+      allow delete: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /timesheets/{timesheetId} {
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.clockIn is number &&
+        request.resource.data.clockIn >= request.time.toMillis() - 300000 &&
+        request.resource.data.clockIn <= request.time.toMillis() + 60000 &&
+        request.resource.data.clockOut == null &&
+        request.resource.data.totalHours == 0 &&
+        request.resource.data.status == 'pending';
+      allow update: if isAdmin() ||
+        (isOwner(resource.data.userId) &&
+          resource.data.clockOut == null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut', 'totalHours']) &&
+          request.resource.data.clockOut is number &&
+          request.resource.data.clockOut >= resource.data.clockIn &&
+          request.resource.data.clockOut <= request.time.toMillis() + 60000 &&
+          request.resource.data.totalHours is number &&
+          request.resource.data.totalHours >= ((request.resource.data.clockOut - resource.data.clockIn) / 3600000) - 0.01 &&
+          request.resource.data.totalHours <= ((request.resource.data.clockOut - resource.data.clockIn) / 3600000) + 0.01);
+      allow delete: if isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if isAdmin() ||
+        (isAuthenticated() && resource.data.senderId == request.auth.uid) ||
+        (isAuthenticated() && resource.data.recipientEmpId == currentUser().employeeId);
+      allow create: if isAdmin() &&
+        request.resource.data.senderId == request.auth.uid &&
+        request.resource.data.senderName == currentUser().name &&
+        request.resource.data.text is string &&
+        request.resource.data.text.size() <= 5000 &&
+        request.resource.data.timestamp is number &&
+        request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
+        request.resource.data.timestamp <= request.time.toMillis() + 60000;
+      allow update, delete: if isAdmin();
+    }
+
+    match /ot_requests/{requestId} {
+      allow read: if isAdmin() || isOwner(resource.data.userId) || isAssignedManager(resource.data.managerId);
+      allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.managerId == currentUser().managerId &&
+        request.resource.data.employeeId == currentUser().employeeId &&
+        request.resource.data.employeeName == currentUser().name &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.timestamp is number &&
+        request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
+        request.resource.data.timestamp <= request.time.toMillis() + 60000;
+      allow update: if isAdmin() ||
+        (isAssignedManager(resource.data.managerId) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.managerId == resource.data.managerId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'denyReason']));
+      allow delete: if isAdmin();
+    }
+
+    match /pto_requests/{requestId} {
+      allow read: if isAdmin() || isOwner(resource.data.userId) || isAssignedManager(resource.data.managerId);
+      allow create: if isOwner(request.resource.data.userId) &&
+        request.resource.data.managerId == currentUser().managerId &&
+        request.resource.data.employeeId == currentUser().employeeId &&
+        request.resource.data.employeeName == currentUser().name &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.timestamp is number &&
+        request.resource.data.timestamp >= request.time.toMillis() - 300000 &&
+        request.resource.data.timestamp <= request.time.toMillis() + 60000;
+      allow update: if isAdmin() ||
+        (isAssignedManager(resource.data.managerId) &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.managerId == resource.data.managerId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'denyReason']));
+      allow delete: if isAdmin();
+    }
+
+    match /reminders/{reminderId} {
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      allow create: if isOwner(request.resource.data.userId) || isAdmin();
+      allow update: if isAdmin() ||
+        (isOwner(resource.data.userId) && request.resource.data.userId == resource.data.userId);
+      allow delete: if isAdmin() || isOwner(resource.data.userId);
+    }
+  }
+}

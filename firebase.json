@@ -1,0 +1,7 @@
+{
+  "firestore": {
+    "database": "ai-studio-thinktimepro-533f3657-be4e-4985-819e-a6f254e8d983",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

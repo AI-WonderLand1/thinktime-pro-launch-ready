@@ -1,0 +1,6 @@
+{
+  "name": "ThinkTime Pro",
+  "description": "Workforce timekeeping, approvals, payroll reporting, messaging, Google Workspace export, and BYOK AI assistance.",
+  "requestFramePermissions": ["notifications", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
