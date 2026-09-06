@@ -23,8 +23,8 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Clean install from lockfile
+        run: npm ci --no-audit --no-fund
 
       - name: Type-check and build
         run: npm run check
