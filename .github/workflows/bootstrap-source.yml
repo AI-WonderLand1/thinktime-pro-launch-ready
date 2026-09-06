@@ -42,8 +42,21 @@ jobs:
           }
 
           def git_blob_sha(data: bytes) -> str:
-              header = f"blob {len(data)}\0".encode()
-              return hashlib.sha1(header + data).hexdigest()
+              return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+
+          def repair_substitution(block: bytes, expected_hash: str, label: str) -> bytes:
+              if hashlib.sha256(block).hexdigest() == expected_hash:
+                  return block
+              for pos in range(len(block)):
+                  original = block[pos]
+                  for ch in alphabet:
+                      if ch == original:
+                          continue
+                      candidate = block[:pos] + bytes((ch,)) + block[pos + 1:]
+                      if hashlib.sha256(candidate).hexdigest() == expected_hash:
+                          print(f"{label}: repaired substitution at offset {pos}")
+                          return candidate
+              raise SystemExit(f"{label}: mismatch is not a single-character substitution")
 
           def repair(path: Path, spec: dict) -> None:
               data = path.read_bytes()
@@ -51,33 +64,51 @@ jobs:
               if git_blob_sha(data) == spec["git"]:
                   print(f"{path.name}: already exact")
                   return
-              if len(data) != expected_len - 1:
-                  raise SystemExit(f"{path.name}: expected a one-character transport loss, got {len(data)} bytes")
 
+              if len(data) == expected_len - 1:
+                  offset = 0
+                  inserted = False
+                  for block_index, (length, expected_hash) in enumerate(spec["blocks"]):
+                      intact = data[offset:offset + length]
+                      if len(intact) == length and hashlib.sha256(intact).hexdigest() == expected_hash:
+                          offset += length
+                          continue
+                      damaged = data[offset:offset + length - 1]
+                      if len(damaged) != length - 1:
+                          raise SystemExit(f"{path.name}: damaged block length mismatch")
+                      for pos in range(length):
+                          for ch in alphabet:
+                              candidate = damaged[:pos] + bytes((ch,)) + damaged[pos:]
+                              if hashlib.sha256(candidate).hexdigest() == expected_hash:
+                                  data = data[:offset] + candidate + data[offset + length - 1:]
+                                  print(f"{path.name}: repaired deletion in block {block_index} at offset {pos}")
+                                  inserted = True
+                                  break
+                          if inserted:
+                              break
+                      if not inserted:
+                          raise SystemExit(f"{path.name}: could not repair deletion in block {block_index}")
+                      break
+                  if not inserted:
+                      raise SystemExit(f"{path.name}: missing character was not located")
+              elif len(data) != expected_len:
+                  raise SystemExit(f"{path.name}: unexpected length {len(data)} (wanted {expected_len})")
+
+              fixed = bytearray()
               offset = 0
               for block_index, (length, expected_hash) in enumerate(spec["blocks"]):
-                  intact = data[offset:offset + length]
-                  if len(intact) == length and hashlib.sha256(intact).hexdigest() == expected_hash:
-                      offset += length
-                      continue
+                  block = data[offset:offset + length]
+                  if len(block) != length:
+                      raise SystemExit(f"{path.name}: short block {block_index}")
+                  fixed.extend(repair_substitution(block, expected_hash, f"{path.name} block {block_index}"))
+                  offset += length
+              data = bytes(fixed)
 
-                  damaged = data[offset:offset + length - 1]
-                  if len(damaged) != length - 1:
-                      raise SystemExit(f"{path.name}: damaged block length mismatch")
-
-                  for pos in range(length):
-                      for ch in alphabet:
-                          candidate = damaged[:pos] + bytes((ch,)) + damaged[pos:]
-                          if hashlib.sha256(candidate).hexdigest() == expected_hash:
-                              repaired = data[:offset] + candidate + data[offset + length - 1:]
-                              if git_blob_sha(repaired) != spec["git"]:
-                                  raise SystemExit(f"{path.name}: block repaired but full blob hash mismatched")
-                              path.write_bytes(repaired)
-                              print(f"{path.name}: repaired missing base64 character in block {block_index}")
-                              return
-                  raise SystemExit(f"{path.name}: could not repair mismatched block {block_index}")
-
-              raise SystemExit(f"{path.name}: no damaged block found")
+              actual = git_blob_sha(data)
+              if actual != spec["git"]:
+                  raise SystemExit(f"{path.name}: repaired blocks but full blob hash is {actual}, wanted {spec['git']}")
+              path.write_bytes(data)
+              print(f"{path.name}: exact blob restored")
 
           for suffix, spec in specs.items():
               repair(Path(f".bootstrap/chunk-{suffix}.b64"), spec)
