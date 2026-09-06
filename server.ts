@@ -225,14 +225,14 @@ async function assertPublicCustomEndpoint(endpoint: string) {
     return;
   }
 
-  let addresses: Awaited<ReturnType<typeof lookup>>;
+  let addresses: Array<{ address: string; family: number }>;
   try {
     addresses = await lookup(url.hostname, { all: true, verbatim: true });
   } catch {
     throw new Error('Custom AI provider hostname could not be resolved.');
   }
 
-  if (!Array.isArray(addresses) || addresses.length === 0) {
+  if (addresses.length === 0) {
     throw new Error('Custom AI provider hostname did not resolve to an address.');
   }
   if (addresses.some(({ address }) => isPrivateIpAddress(address))) {
